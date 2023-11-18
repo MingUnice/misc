@@ -1,0 +1,1303 @@
+#+beginp_comment
+;;; note.org --- Technology-related personal notes
+
+;;; Commentary:
+;;  It's a personal note.
+;;  Written by (c) ZHONG Ming.  2023-2024.
+#+end_comment
+
+* interrupt
+bottom halves 包括了 softirq, tasklet 和 workqueue
+
+exception 分为 fault, trap, abort, fault 如 page fault 会恢复到之前的指令, trap 如 breakpoint(int 3)/systemcall 会恢复到之后的指令, abort 不会恢复
+
+** 中断系统的状态
+#+begin_src c
+  /*
+   *         PREEMPT_MASK:	0x000000ff
+   *         SOFTIRQ_MASK:	0x0000ff00
+   *         HARDIRQ_MASK:	0x000f0000
+   *             NMI_MASK:	0x00f00000
+   * PREEMPT_NEED_RESCHED:	0x80000000
+   */
+  #define hardirq_count()		(preempt_count() & HARDIRQ_MASK)
+
+  #define irq_count()		(nmi_count() | hardirq_count() | softirq_count())
+
+  #define in_nmi()			(nmi_count())
+  #define in_hardirq()		(hardirq_count())
+  #define in_serving_softirq()	(softirq_count() & SOFTIRQ_OFFSET)
+  #define in_task()			(!(in_nmi() | in_hardirq() | in_serving_softirq()))
+  #define in_irq()			(hardirq_count())
+  #define in_softirq()		(softirq_count())
+  #define in_interrupt()		(irq_count())
+#+end_src
+
+cli/sti: clear/set allow interrupt flags
+#+begin_src c
+  static __always_inline void native_irq_disable(void)
+  {
+    asm volatile("cli": : :"memory");
+  }
+
+  static __always_inline void native_irq_enable(void)
+  {
+    asm volatile("sti": : :"memory");
+  }
+#+end_src
+
+flags 必须在同一栈帧中
+#+begin_src c
+  static __always_inline unsigned long arch_local_irq_save(void)
+  {
+    unsigned long flags = arch_local_save_flags();
+    arch_local_irq_disable();
+    return flags;
+  }
+
+  static __always_inline void arch_local_irq_restore(unsigned long flags)
+  {
+    if (!arch_irqs_disabled_flags(flags))
+      arch_local_irq_enable();
+  }
+
+  static __always_inline int arch_irqs_disabled_flags(unsigned long flags)
+  {
+    return !(flags & X86_EFLAGS_IF);
+  }
+
+  #define X86_EFLAGS_IF_BIT	9 /* Interrupt Flag */
+  #define X86_EFLAGS_IF	_BITUL(X86_EFLAGS_IF_BIT)
+#+end_src
+
+* memory
+** virtual
+stack 的最大大小默认为 8M
+ulimit -s : the maximun stack size
+
+** physical
+物理内存对应的结构体为 struct page, page_address 返回其虚拟地址
+#+begin_src c
+  unsigned long __get_free_pages(gfp_t gfp_mask, unsigned int order)
+  {
+    struct page *page;
+    spage = alloc_pages(gfp_mask & ~__GFP_HIGHMEM, order);
+    if (!page)
+      return 0;
+    return (unsigned long) page_address(page);
+  }
+
+  static inline void *page_address(const struct page *page)
+  {
+    return page->virtual;
+  }
+#+end_src
+** barrier
+RMW(Read-Modifiy-Write) 可能是非原子的, 使用 volatile 关键字使变量不被加载到寄存器, 在 load 前和 store 后使用编译级内存屏障, 但并不能防止 CPU 的重新排序 (reordering), 合并 (merging) 或重新获取 (refetching)
+#+begin_src c
+  #define access_once(x) (*(__volatile__ __typeof__(x) *)&(x))
+
+  #define load_shared(x) ({ barrier(); access_once(x); })
+
+  #define store_shared(x, v) ({ access_once(x) = (v); barrier(); })
+#+end_src
+
+编译级的屏障保证编译生成的汇编代码的顺序是按照程序文本的顺序, 但实际运行的时候 CPU 仍有可能将它们乱序 (out-of-order)
+
+#+begin_src c
+  #define barrier() __asm__ __volatile__ ("":::"memory")
+  #define __READ_ONCE(x) (*(const volatile __unqual_scalar_typeof(x) *)&(x))
+  #define __WRITE_ONCE(x, val)                    \
+    do {                                          \
+      *(volatile typeof(x) *)&(x) = (val);        \
+    } while (0)
+  #define smp_store_release(p, v)                 \
+    do {                                          \
+      barrier();                                  \
+      WRITE_ONCE(*p, v);                          \
+    } while (0)
+  #define smp_load_acquire(p)                     \
+    ({                                            \
+      typeof(*p) ___p1 = READ_ONCE(*p);           \
+      barrier();                                  \
+      ___p1;                                      \
+    })
+#+end_src
+
+CPU 级别的屏障保证实际执行的顺序是按照程序文本的顺序, 同时保证了多 CPU 间的缓存一致性
+x86 Total Store Order 下没有 store-store, load-store 和 load-load 乱序, 故我们只需要考虑 store-load 乱序
+
+#+begin_src c
+  #if defined(__i386__)
+  #define mb()	asm volatile("lock; addl $0,0(%%esp)" ::: "memory")
+  #define rmb()	asm volatile("lock; addl $0,0(%%esp)" ::: "memory")
+  #define wmb()	asm volatile("lock; addl $0,0(%%esp)" ::: "memory")
+  #elif defined(__x86_64__)
+  #define mb()	asm volatile("mfence" ::: "memory")
+  #define rmb()	asm volatile("lfence" ::: "memory")
+  #define wmb()	asm volatile("sfence" ::: "memory")
+  #define smp_rmb() barrier()
+  #define smp_wmb() barrier()
+  #define smp_mb()  asm volatile("lock; addl $0,-132(%%rsp)" ::: "memory", "cc")
+  #endif
+#+end_src
+
+lock addl 的位置可以为 rsp, rsp-8, rsp-cache_line, rsp-red_zone 四种, rsp-cache_line 探索当内存访问跨越不同的缓存行时缓存行为如何受到影响, rsp-red_zone 评估访问远离堆栈指针的内存的影响
+
+cache line size 64
+L1 dcache size 32k
+L1 icache size 32k
+L2 cache size 2M
+
+membarrier 是减少 CPU 级别的内存屏障指令开销的一种屏障, 适用场景为, 有些用到了屏障的函数被执行的频率比另一些用到了屏障的函数高的多, 那么使用一个编译级内存屏障加 membarrier 的组合可能会比使用两个 store-load 内存屏障的开销要小, 用于 rcu 中
+
+#+begin_src c
+  static inline __attribute__((always_inline))
+  int membarrier(int cmd, unsigned int flags, int cpu_id)
+  {
+    return syscall(__NR_membarrier, cmd, flags, cpu_id);
+  }
+  #define membarrier_master() membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0)
+  #define membarrier_slave() barrier()
+  #define membarrier_register() membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0)
+#+end_src
+
+** paging
+当 CR0.PG = 1, CR4.PAE = 1, IA32_EFER.LME = 1, CR4.LA57 = 0 时采用4级分页, 将 48-bit 的线性地址转为 52-bit 的物理地址
+当 CR0.PG = 1, CR4.PAE = 1, IA32_EFER.LME = 1, CR4.LA57 = 1 时采用5级分页, 将 57-bit 的线性地址转为 52-bit 的物理地址
+
+Process-context identifiers (PCIDs) 在 CR4.PCIDE = 1 时生效, 值为 CR3 的 [0:11] bits
+当 mov 将 CR4.PCIDE 清零时, 所有的缓存信息将无效
+
+native_flush_tlb_global() 全局刷新TLB:
+首先检查 CPU 是否支持 INVPCID 指令
+如果 INVPCID 指令不可用将对 CR4 寄存器执行读-修改-写操作以刷新 TLB
+
+native_flush_tlb_local() 刷新当前程的 TLB
+调用 invalidate_user_asid() 使当前加载的内存管理单元 (MMU) 的地址空间标识符 (ASID) 无效
+通过写入 CR3 寄存器来刷新 TLB
+
+#+begin_src c
+  /*
+   * Flush everything
+   */
+  STATIC_NOPV void native_flush_tlb_global(void)
+  {
+    unsigned long flags;
+
+    if (static_cpu_has(X86_FEATURE_INVPCID)) {
+      /*
+       * Using INVPCID is considerably faster than a pair of writes
+       * to CR4 sandwiched inside an IRQ flag save/restore.
+       *
+       * Note, this works with CR4.PCIDE=0 or 1.
+       */
+      invpcid_flush_all();
+      return;
+    }
+
+    /*
+     * Read-modify-write to CR4 - protect it from preemption and
+     * from interrupts. (Use the raw variant because this code can
+     * be called from deep inside debugging code.)
+     */
+    raw_local_irq_save(flags);
+
+    __native_tlb_flush_global(this_cpu_read(cpu_tlbstate.cr4));
+
+    raw_local_irq_restore(flags);
+  }
+
+  /*
+   * Flush the entire current user mapping
+   */
+  STATIC_NOPV void native_flush_tlb_local(void)
+  {
+    /*
+     * Preemption or interrupts must be disabled to protect the access
+     * to the per CPU variable and to prevent being preempted between
+     * read_cr3() and write_cr3().
+     */
+    WARN_ON_ONCE(preemptible());
+
+    invalidate_user_asid(this_cpu_read(cpu_tlbstate.loaded_mm_asid));
+
+    /* If current->mm == NULL then the read_cr3() "borrows" an mm */
+    native_write_cr3(__native_read_cr3());
+  }
+#+end_src
+
+*** invalidation of TLBs and paging-structure caches
+
+INVLPG: 使一个线性地址对应的缓存失效
+
+INVPCID: 使 individual-address/single-context/all-context 的缓存失效
+
+MOV to CR0: CR0.PG 的值从1改为0 使所有缓存失效
+
+MOV to CR3: 根据 CR4.PCIDE 和操作数的63 bit 来失效缓存
+
+MOV to CR4: 改变 CR4.PGE 的值或者将 CR4.PCIDE 的值从1改为0时使所有缓存失效, 改变 CR4.PAE/CR4.SMEP 的值时只使关联当前 PCID 的缓存失效
+
+** page cache and anonymous pages
+page_mapping 指的是内存对磁盘的缓存, page_mapped 指的是虚拟地址和物理地址的映射
+
+page->mapping 对于 page cache 是 address_space
+对于 anonymous pages 是 anon_vma
+mapping 指向 anon_vma 时最低位为1, 否则为0
+
+reverse mapping 时分别从 address_space 和 anon_vma 中找到 PTE
+为了防止 copy on write 导致 anonymous pages 的 reverse mapping 性能下降
+采用了 per process 的 anon_vma_chain 来辅助
+
+** page reclaim
+内存回收根据 page 是 anonymous/file 和 activity, 将 page 分到了4个链表中:
+inactive_anon, active_anon, inactive_file, active_file
+
+inactive/active 直接的 promotion/demotion 通过判断 enum pageflages 中的 PG_active/PG_referenced
+
+promotion: inactive 中的 page PG_referenced 达到2时移到 active 头部且 PG_referenced 清零
+
+demotion: active 尾的 page PG_referenced 为0时移到 inactive 头部, 为1时清零且移到 active 头部
+
+struct pagevec 作为 per-CPU 变量用于批量 demotion (#define PAGEVEC_SIZE 15)
+
+优先回收 anonymous/file pages 通过 swappiness (sysctl vm.swappiness) 决定, swappiness 越小越优先回收 file
+
+每个 node 对应着一个 kswapd 进程
+
+** page fault
+用户空间根据是否是 hugepage 调用 __handle_mm_fault() 或 hugetlb_fault(), __handle_mm_fault() 会调用 handle_pte_fault(), handle_pte_fault() 根据是 file/anonymous 调用 do_fault()/do_anonymous_page()
+#+begin_src c
+  static vm_fault_t do_pte_missing(struct vm_fault *vmf)
+  {
+    if (vma_is_anonymous(vmf->vma))
+      return do_anonymous_page(vmf);
+    else
+      return do_fault(vmf);
+  }
+#+end_src
+
+** ptmalloc2
+
+进程启动时调用 brk 创建132k的 heap, malloc 大于132k的内存时 mmap 出一块 anon
+创建一个线程时 mmap 出8M的 anon, 在该线程里 malloc 时 mmap 出65M的 anon
+
+** kmalloc
+
+大于2倍页面 (大于8k) 时用 __alloc_page, 小于时用 slab 申请一块物理内存, 返回虚拟内存地址
+#+begin_src c
+  static __always_inline __alloc_size(1) void *kmalloc(size_t size, gfp_t flags)
+  {
+    if (__builtin_constant_p(size) && size) {
+      unsigned int index;
+
+      if (size > KMALLOC_MAX_CACHE_SIZE)
+        return kmalloc_large(size, flags);
+
+      index = kmalloc_index(size);
+      return kmalloc_trace(
+                           kmalloc_caches[kmalloc_type(flags)][index],
+                           flags, size);
+    }
+    return __kmalloc(size, flags);
+  }
+
+  static void *__kmalloc_large_node(size_t size, gfp_t flags, int node)
+  {
+    struct page *page;
+    void *ptr = NULL;
+    unsigned int order = get_order(size);
+
+    if (unlikely(flags & GFP_SLAB_BUG_MASK))
+      flags = kmalloc_fix_flags(flags);
+
+    flags |= __GFP_COMP;
+    page = alloc_pages_node(node, flags, order);
+    if (page) {
+      ptr = page_address(page);
+      mod_lruvec_page_state(page, NR_SLAB_UNRECLAIMABLE_B,
+                            PAGE_SIZE << order);
+    }
+
+    ptr = kasan_kmalloc_large(ptr, size, flags);
+    /* As ptr might get tagged, call kmemleak hook after KASAN. */
+    kmemleak_alloc(ptr, size, 1, flags);
+    kmsan_kmalloc_large(ptr, size, flags);
+
+    return ptr;
+  }
+
+  void *kmalloc_trace(struct kmem_cache *s, gfp_t gfpflags, size_t size)
+  {
+    void *ret = __kmem_cache_alloc_node(s, gfpflags, NUMA_NO_NODE,
+                                        size, _RET_IP_);
+
+    trace_kmalloc(_RET_IP_, ret, size, s->size, gfpflags, NUMA_NO_NODE);
+
+    ret = kasan_kmalloc(s, ret, size, gfpflags);
+    return ret;
+  }
+#+end_src
+** slab
+
+fast path: 从 per-cpu 的 freelist/page/partial 获取
+slow path: 当 per-cpu 缓存为空, 去 node 的 partial 中迁移到 per-cpu, 当 node 也为空时从 buddy system 中获取
+
+* synchronization
+** seqlock
+顺序锁用于获取 jiffies
+#+begin_src c
+  u64 get_jiffies_64(void)
+  {
+    unsigned int seq;
+    u64 ret;
+    do {
+      seq = read_seqcount_begin(&jiffies_seq);
+      ret = jiffies_64;
+    } while (read_seqcount_retry(&jiffies_seq, seq));
+    return ret;
+  }
+#+end_src
+
+** spinlock
+CAS 保证了 correctness, 但没有实现 fairness, 可能导致某个线程等待了很久一直没有抢到锁
+#+begin_src c
+char compare_and_swap(int *ptr, int oldval, int newval) {
+    unsigned char ret;
+    // Note that sete sets a ’byte’ not the word
+    __asm__ __volatile__ (
+        " lock\n"
+        " cmpxchgl %2,%1\n"
+        " sete %0\n"
+        : "=q" (ret), "=m" (*ptr)
+        : "r" (newval), "m" (*ptr), "a" (oldval)
+        : "memory");
+    return ret;
+}
+#+end_src
+
+fetch and add 保证了一定的 fairness, 先等待的线程获得的更小的 myturn, 这样也会更早地达成 lock->turn == myturn, 获取锁
+
+但有两个问题, 一是当 turn 的值没有变化时仍会不断地自旋检查, 二是当值变化时, CPU cache 中的值会放入 invalidate queue (MESI protocol), 但只有获取锁的 CPU 的这步操作有意义
+#+begin_src c
+  typedef struct lock_t {
+    int ticket;
+    int turn;
+  } lock_t;
+
+  void lock_init(lock_t *lock)
+  {
+    lock->ticket = 0;
+    lock->turn = 0;
+  }
+
+  int fetch_and_add(int *ptr)
+  {
+    int old = *ptr;
+    *ptr = old + 1;
+    return old;
+  }
+
+  void lock(lock_t *lock)
+  {
+    int myturn = fetch_and_add(&lock->ticket);
+    while (lock->turn != myturn);
+  }
+
+  void unlock(lock_t *lock)
+  {
+    fetch_and_add(&lock->turn);
+  }
+#+end_src
+
+为了避免缓存一致性带来的开销, mcs spinlock 在 ticket spinlock 的基础上让每个 CPU 去检查自己的各自的变量
+
+#+begin_src c
+  struct mcs_spinlock {
+    struct mcs_spinlock *next;
+    int locked;
+    int count;
+  };
+
+  static inline
+  void mcs_spin_lock(struct mcs_spinlock **lock, struct mcs_spinlock *node)
+  {
+    struct mcs_spinlock *prev;
+    node->locked = 0;
+    node->next   = NULL;
+    prev = xchg(lock, node);
+    if (likely(prev == NULL)) {
+      return;
+    }
+    WRITE_ONCE(prev->next, node);
+    while (READ_ONCE(node->locked))
+      cpu_relax();
+  }
+
+  static inline
+  void mcs_spin_unlock(struct mcs_spinlock **lock, struct mcs_spinlock *node)
+  {
+    struct mcs_spinlock *next = READ_ONCE(node->next);
+    if (likely(!next)) {
+      if (likely(cmpxchg_release(lock, node, NULL) == node))
+        return;
+      while (!(next = READ_ONCE(node->next)))
+        cpu_relax();
+    }
+    barrier();
+    WRITE_ONCE(next->locked, 1);
+  }
+#+end_src
+
+#+begin_src c
+  /* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */
+  static __always_inline void rep_nop(void)
+  {
+    asm volatile("rep; nop" ::: "memory");
+  }
+
+  static __always_inline void cpu_relax(void)
+  {
+    rep_nop();
+  }
+#+end_src
+
+** semaphore
+#+begin_src c
+  struct semaphore_waiter {
+    struct list_head list;
+    struct task_struct *task;
+    bool up;
+  };
+#+end_src
+
+acquire the semaphore unless interrupted
+#+begin_src c
+  int __sched down_interruptible(struct semaphore *sem)
+  {
+    unsigned long flags;
+    int result = 0;
+
+    might_sleep();
+    raw_spin_lock_irqsave(&sem->lock, flags);
+    if (likely(sem->count > 0))
+      sem->count--;
+    else
+      result = __down_interruptible(sem);
+    raw_spin_unlock_irqrestore(&sem->lock, flags);
+
+    return result;
+  }
+
+  static noinline int __sched __down_interruptible(struct semaphore *sem)
+  {
+    return __down_common(sem, TASK_INTERRUPTIBLE, MAX_SCHEDULE_TIMEOUT);
+  }
+
+  static inline int __sched ___down_common(struct semaphore *sem, long state,
+                                           long timeout)
+  {
+    struct semaphore_waiter waiter;
+
+    list_add_tail(&waiter.list, &sem->wait_list);
+    waiter.task = current;
+    waiter.up = false;
+
+    for (;;) {
+      if (signal_pending_state(state, current))
+        goto interrupted;
+      if (unlikely(timeout <= 0))
+        goto timed_out;
+      __set_current_state(state);
+      raw_spin_unlock_irq(&sem->lock);
+      timeout = schedule_timeout(timeout);
+      raw_spin_lock_irq(&sem->lock);
+      if (waiter.up)
+        return 0;
+    }
+
+   timed_out:
+    list_del(&waiter.list);
+    return -ETIME;
+
+   interrupted:
+    list_del(&waiter.list);
+    return -EINTR;
+  }
+#+end_src
+
+release the semaphore
+#+begin_src c
+  void __sched up(struct semaphore *sem)
+  {
+    unsigned long flags;
+
+    raw_spin_lock_irqsave(&sem->lock, flags);
+    if (likely(list_empty(&sem->wait_list)))
+      sem->count++;
+    else
+      __up(sem);
+    raw_spin_unlock_irqrestore(&sem->lock, flags);
+  }
+
+  static noinline void __sched __up(struct semaphore *sem)
+  {
+    struct semaphore_waiter *waiter = list_first_entry(&sem->wait_list,
+                                                       struct semaphore_waiter, list);
+    list_del(&waiter->list);
+    waiter->up = true;
+    wake_up_process(waiter->task);
+  }
+#+end_src
+** completion
+It differs from semaphores in that their default case is the opposite, wait_for_completion default blocks whereas semaphore default non-block.
+#+begin_src c
+  struct swait_queue_head {
+    raw_spinlock_t lock;
+    struct list_head task_list;
+  };
+
+  struct swait_queue {
+    struct task_struct *task;
+    struct list_head task_list;
+  };
+
+  struct completion {
+    unsigned int done;
+    struct swait_queue_head wait;
+  };
+#+end_src
+
+acquire the completion
+#+begin_src c
+  void __sched wait_for_completion(struct completion *x)
+  {
+    wait_for_common(x, MAX_SCHEDULE_TIMEOUT, TASK_UNINTERRUPTIBLE);
+  }
+
+  static long __sched
+  wait_for_common(struct completion *x, long timeout, int state)
+  {
+    return __wait_for_common(x, schedule_timeout, timeout, state);
+  }
+
+  static inline long __sched
+  __wait_for_common(struct completion *x,
+                    long (*action)(long), long timeout, int state)
+  {
+    might_sleep();
+
+    complete_acquire(x);
+
+    raw_spin_lock_irq(&x->wait.lock);
+    timeout = do_wait_for_common(x, action, timeout, state);
+    raw_spin_unlock_irq(&x->wait.lock);
+
+    complete_release(x);
+
+    return timeout;
+  }
+
+  static inline long __sched
+  do_wait_for_common(struct completion *x,
+                     long (*action)(long), long timeout, int state)
+  {
+    if (!x->done) {
+      DECLARE_SWAITQUEUE(wait);
+
+      do {
+        if (signal_pending_state(state, current)) {
+          timeout = -ERESTARTSYS;
+          break;
+        }
+        __prepare_to_swait(&x->wait, &wait);
+        __set_current_state(state);
+        raw_spin_unlock_irq(&x->wait.lock);
+        timeout = action(timeout);
+        raw_spin_lock_irq(&x->wait.lock);
+      } while (!x->done && timeout);
+      __finish_swait(&x->wait, &wait);
+      if (!x->done)
+        return timeout;
+    }
+    if (x->done != UINT_MAX)
+      x->done--;
+    return timeout ?: 1;
+  }
+
+  static inline void complete_acquire(struct completion *x) {}
+  static inline void complete_release(struct completion *x) {}
+#+end_src
+
+release the completion
+
+#+begin_src c
+  void complete(struct completion *x)
+  {
+    unsigned long flags;
+
+    raw_spin_lock_irqsave(&x->wait.lock, flags);
+
+    if (x->done != UINT_MAX)
+      x->done++;
+    swake_up_locked(&x->wait);
+    raw_spin_unlock_irqrestore(&x->wait.lock, flags);
+  }
+
+  void complete_all(struct completion *x)
+  {
+    unsigned long flags;
+
+    lockdep_assert_RT_in_threaded_ctx();
+
+    raw_spin_lock_irqsave(&x->wait.lock, flags);
+    x->done = UINT_MAX;
+    swake_up_all_locked(&x->wait);
+    raw_spin_unlock_irqrestore(&x->wait.lock, flags);
+  }
+
+  void swake_up_locked(struct swait_queue_head *q)
+  {
+    struct swait_queue *curr;
+
+    if (list_empty(&q->task_list))
+      return;
+
+    curr = list_first_entry(&q->task_list, typeof(*curr), task_list);
+    wake_up_process(curr->task);
+    list_del_init(&curr->task_list);
+  }
+
+  void swake_up_all_locked(struct swait_queue_head *q)
+  {
+    while (!list_empty(&q->task_list))
+      swake_up_locked(q);
+  }
+#+end_src
+** mutex
+mutex 可以睡眠 (block) 不能用于 atomic 上下文中
+#+begin_src c
+  struct mutex {
+    atomic_long_t owner;
+    raw_spinlock_t wait_lock;
+  #ifdef CONFIG_MUTEX_SPIN_ON_OWNER
+    struct optimistic_spin_queue osq; /* Spinner MCS lock */
+  #endif
+    struct list_head wait_list;
+  #ifdef CONFIG_DEBUG_MUTEXES
+    void *magic;
+  #endif
+  #ifdef CONFIG_DEBUG_LOCK_ALLOC
+    struct lockdep_map dep_map;
+  #endif
+  };
+#+end_src
+
+owner 的前3位可以用作 flags
+#+begin_src c
+  #define MUTEX_FLAG_WAITERS	0x01
+  #define MUTEX_FLAG_HANDOFF	0x02
+  #define MUTEX_FLAG_PICKUP		0x04
+  #define MUTEX_FLAGS		0x07
+
+  static inline struct task_struct *__mutex_owner(struct mutex *lock)
+  {
+    return (struct task_struct *)(atomic_long_read(&lock->owner) & ~MUTEX_FLAGS);
+  }
+#+end_src
+
+fast path, mid path, slow path:
+fast path 简单地判断 onwer 是否为0, 然后让当前进程获取锁
+
+#+begin_src c
+  static __always_inline bool __mutex_trylock_fast(struct mutex *lock)
+  {
+    unsigned long curr = (unsigned long)current;
+    unsigned long zero = 0UL;
+
+    if (atomic_long_try_cmpxchg_acquire(&lock->owner, &zero, curr))
+      return true;
+
+    return false;
+  }
+#+end_src
+
+mid path 需要定义 CONFIG_MUTEX_SPIN_ON_OWNER, 加入 osq 队列, 自旋地获取锁, 当 onwer sleep 或自己被 preempt 时退出自旋, 从 osq 中删除, 加入 wait_list 开始 slow_path
+
+为了保证公平性, 防止先等待的 task 在 wait_list, 后等待的 task 在 osq, 设置第2个 flag 位 flag handoff, 指示解锁时去 wait_list 中取
+
+* modes of operation
+operate mode 分为 legacy mode 和 long mode
+legacy mode 包括了 real mode, protected mode, system management mode 和 virtual-8086 mode
+long mode (IA-32e mode) 包括了 compatibility mode 和 64-bit mode
+
+* control registers
+control registers CR0,1,2,3,4,8 决定处理器的操作模式和当前执行任务的特性
+
+CR0 包含了 operate mode 和 processor states
+CR2 包含了 page-fault linear address
+CR3 包含了 分页系统的物理基地址
+CR8 包含了 对 task priority register 的读写访问
+
+CR0.PG Paging 使用分页
+CR3.PCD Page-level Cache Disable
+CR3.PWT Page-level Write-Through
+CR4.LA57 57-bit linear addresses 使用5级分页或者4级分页
+CR4.PCIDE PCID-Enable Bit
+* task management
+task 分为实时和非实时:
+#+begin_src c
+  static inline bool task_is_realtime(struct task_struct *tsk)
+  {
+    int policy = tsk->policy;
+    /* 先进先出或者实时轮转 */
+    if (policy == SCHED_FIFO || policy == SCHED_RR)
+      return true;
+    if (policy == SCHED_DEADLINE)
+      return true;
+    return false;
+  }
+#+end_src
+
+通过判断 task 的 mm_strcut *mm 是否为空来判断是内核进程, 为空为内核进程, 不为空为用户进程
+
+mm_struct 有两个计数器 mm_users 记录真实用户(用户进程), mm_count 记录真实用户(用户进程)和匿名用户(内核进程)
+
+mm_users 通过 mmget()/mmput() 修改, mm_count 通过 mmgrab()/mmdrop() 修改
+** schedule
+调度指标 (sheduling policy)
+  - turnaround time 周转时间, 任务完成时间减去到达时间
+  - response time 响应时间, 任务首次运行时间减去到达时间
+  - fairness 公平性
+
+
+触发调度的方式:
+  - 显式 blocking, 如 mutex, semaphore, waitqueue
+  - scheduler_tick() 修改 TIF_NEED_RESCHED flag
+  - 唤醒时加入 run queue 并修改 TIF_NEED_RESCHED flag:
+    - 当内核可抢占:
+      - syscall 或 exeception 中调 preempt_enable
+      - 从 interrupt handler 到 preemptible context
+    - 当内核不可抢占:
+      - cond_resched()
+      - 显式 schedule()
+      - 从 syscall 或 exeception 到 user space
+      - 从 interrupt handler 到 user space
+
+#+begin_src c
+  asmlinkage __visible void __sched schedule(void)
+  {
+    struct task_struct *tsk = current;
+
+    sched_submit_work(tsk);
+    do {
+      preempt_disable();
+      __schedule(SM_NONE);
+      sched_preempt_enable_no_resched();
+    } while (need_resched());
+    sched_update_worker(tsk);
+  }
+#+end_src
+
+** cfs
+处理非实时任务调度器: 公平调度器(Completely Fair Scheduler)
+根据任务在 CPU 上运行时间的长短(虚拟运行时间 vruntime)排列在一个红黑树上
+优先调度 vruntime 小的任务(pick_next_entity())
+优先级较低(nice 值高)的任务 vruntime 会增加的更快(update_curr())
+#+begin_src c
+  struct sched_entity {
+    struct load_weight load;
+    struct rb_node run_node;
+    struct list_head group_node;
+    unsigned int on_rq;
+    u64 exec_start;
+    u64 sum_exec_runtime;
+    u64 vruntime;
+    u64 prev_sum_exec_runtime;
+    u64 nr_migrations;
+    struct sched_statistics statistics;
+  };
+
+  static struct sched_entity *
+  pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr);
+
+  static void update_curr(struct cfs_rq *cfs_rq)
+  {
+    struct sched_entity *curr = cfs_rq->curr;
+    curr->vruntime += calc_delta_fair(delta_exec, curr);
+  }
+#+end_src
+** preempt
+preempt 抢占, preempt_count 初始值为0, 当 preempt_count 为0时表示可以抢占
+#+begin_src c
+  #define preempt_disable() \
+  do { \
+          preempt_count_inc(); \
+          barrier(); \
+  } while (0)
+
+  #define preempt_enable() \
+  do { \
+          barrier(); \
+          if (unlikely(preempt_count_dec_and_test())) \
+                  __preempt_schedule(); \
+  } while (0)
+
+  #define preemptible() (preempt_count() == 0 && !irqs_disabled())
+#+end_src
+** context switch
+context switch 时 mm 的变化:
+
+| prev   | next   |                                          |
+|--------+--------+------------------------------------------|
+| kernel | kernel | lazy tlb, transfer active mm             |
+| user   | kernel | lazy tlb, mmgrab                         |
+| kernel | user   | switch mm, mmdrop(in finish task switch) |
+| user   | user   | switch mm                                |
+
+#+begin_src c
+  void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
+  {
+    if (this_cpu_read(cpu_tlbstate.loaded_mm) == &init_mm)
+      return;
+
+    this_cpu_write(cpu_tlbstate_shared.is_lazy, true);
+  }
+#+end_src
+
+context switch 时寄存器的变化:
+
+#+begin_src asm
+/*
+ * %eax: prev task
+ * %edx: next task
+ */
+.pushsection .text, "ax"
+SYM_CODE_START(__switch_to_asm)
+	/* save callee-saved registers */
+	pushl	%ebp
+	pushl	%ebx
+	pushl	%edi
+	pushl	%esi
+	pushfl
+
+	/* switch stack */
+	movl	%esp, TASK_threadsp(%eax)
+	movl	TASK_threadsp(%edx), %esp
+
+	popfl
+	/* restore callee-saved registers */
+	popl	%esi
+	popl	%edi
+	popl	%ebx
+	popl	%ebp
+
+	jmp	__switch_to
+SYM_CODE_END(__switch_to_asm)
+
+/*
+ * %rdi: prev task
+ * %rsi: next task
+ */
+.pushsection .text, "ax"
+SYM_FUNC_START(__switch_to_asm)
+	/*
+	 * save callee-saved registers
+	 */
+	pushq	%rbp
+	pushq	%rbx
+	pushq	%r12
+	pushq	%r13
+	pushq	%r14
+	pushq	%r15
+
+	/* switch stack */
+	movq	%rsp, TASK_threadsp(%rdi)
+	movq	TASK_threadsp(%rsi), %rsp
+
+	/* restore callee-saved registers */
+	popq	%r15
+	popq	%r14
+	popq	%r13
+	popq	%r12
+	popq	%rbx
+	popq	%rbp
+
+	jmp	__switch_to
+SYM_FUNC_END(__switch_to_asm)
+#+end_src
+** cpu load balancing
+cpu load 通常用 runqueue 上所有 task 的 load 之和来计算
+
+cpu_capacity 表示 cpu 可用于 cfs 任务的算力, 会经常更新
+#+begin_src c
+  static void update_cpu_capacity(struct sched_domain *sd, int cpu)
+  {
+          unsigned long capacity = scale_rt_capacity(cpu);
+          struct sched_group *sdg = sd->groups;
+
+          cpu_rq(cpu)->cpu_capacity_orig = arch_scale_cpu_capacity(cpu);
+
+          if (!capacity)
+                  capacity = 1;
+
+          cpu_rq(cpu)->cpu_capacity = capacity;
+          trace_sched_cpu_capacity_tp(cpu_rq(cpu));
+
+          sdg->sgc->capacity = capacity;
+          sdg->sgc->min_capacity = capacity;
+          sdg->sgc->max_capacity = capacity;
+  }
+#+end_src
+
+PELT(Per-Entity Load Tracking) 算法跟踪每个调度实体的负载
+* c/cpp
+链接时, 依赖其他库的库一定要放到被依赖库的前面
+
+在构造函数和析构函数中调用虚的成员函数不会有虚函数的效果, 即还是调用父类的成员函数
+
+亡值 (xvalue) 初始化对象时, 会调用移动构造函数
+
+std::array 内存分配在栈 (stack) 上
+
+std::bind 和 std::thread 必须显式通过 std::ref 来绑定引用进行传参
+
+scoped_lock 防止死锁
+
+在一条表达式中如有未定义执行顺序的 operators 如 int i = f1() * f2();
+我们不能确定 f1() 和 f2() 哪个先执行, 会造成 has undefined behavior
+
+__builtin_popcount() 用于计算一个 32 位无符号整数有多少个位为 1
+
+函数体内部的 static 变量：作用域在函数体内, 只分配一次, 多线程下, 所有调用这个函数的线程使用的是同一个 static 变量
+
+构造函数调用顺序 base -> member -> this
+
+使用 setbuf 或 setvbuf 可以将一个文件流设为全缓冲 (_IOFBF), 行缓冲 (_IOLBF) 或不带缓冲 (_IONBF)
+默认情况下, 标准输入输出连至终端时是行缓冲的, 重定向到普通文件时是全缓冲的
+
+创建一个守护进程的步骤:
+  - clear file creation mask: umask(0)
+  - fork 子进程, 父进程退出
+  - become a session leader to lose controlling TTY: setsid()
+  - ensure future opens won't allocate controlling TTYs: ignore SIGHUP
+  - fork 子进程, 父进程退出
+  - change the current working directory to the root: chdir("/")
+  - close all open file descriptors: close(i) i 从0到 rlim_max
+  - attach file descriptors 0, 1, and 2 to /dev/null: open("/dev/null", O_RDWR)
+  - initialize the log file: openlog, syslog
+经过以上步骤, 这个守护进程在孤儿进程组中 (PPID 为1), 不是会话首进程 (不会被分配到一个控制终端)
+
+
+** time
+相关 struct:
+#+begin_src c
+  #include <time.h>
+  struct tm {
+    int tm_sec;    /* Seconds (0-60) */
+    int tm_min;    /* Minutes (0-59) */
+    int tm_hour;   /* Hours (0-23) */
+    int tm_mday;   /* Day of the month (1-31) */
+    int tm_mon;    /* Month (0-11) */
+    int tm_year;   /* Year - 1900 */
+    int tm_wday;   /* Day of the week (0-6, Sunday = 0) */
+    int tm_yday;   /* Day in the year (0-365, 1 Jan = 0) */
+    int tm_isdst;  /* Daylight saving time */
+  };
+
+  #include <sys/time.h>
+  struct timeval {
+    time_t      tv_sec;     /* seconds */
+    suseconds_t tv_usec;    /* microseconds */
+  };
+  struct timespec {
+    time_t          tv_sec;
+    long            tv_nsec;
+  };
+  struct timezone {
+    int tz_minuteswest;     /* minutes west of Greenwich */
+    int tz_dsttime;         /* type of DST correction */
+  };
+#+end_src
+
+convert tm structure to time_t
+#+begin_src c
+  time_t mktime (struct tm *timeptr);
+#+end_src
+
+convert time_t to tm as local time
+#+begin_src c
+  struct tm *localtime (const time_t *timer);
+  // localtime_r 是可重入的 localtime
+  struct tm *localtime_r(const time_t *timep, struct tm *result);
+
+  setenv("TZ", "/usr/share/zoneinfo/America/Los_Angeles", 1); // POSIX-specific
+  setenv("TZ", "/usr/share/zoneinfo/Asia/Shanghai", 1); // POSIX-specific
+#+end_src
+
+convert time_t to tm as UTC time
+#+begin_src c
+  struct tm *gmtime (const time_t *timer);
+#+end_src
+** cmake
+- 添加编译选项: add_compile_options(-g -O0 -std=c++17 -D_DEBUG -D__LINUX__ -Wno-enum-compare)
+- 获取父目录: get_filename_component(PARENT_DIR ${PROJECT_SOURCE_DIR} DIRECTORY)
+- 打印信息: message(STATUS "parent directory is: " ${PARENT_DIR})
+- 指定可执行文件存放目录: set(EXECUTABLE_OUTPUT_PATH ${PARENT_DIR}/bin)
+- 添加 protobuf 的头文件路径和链接库:
+  - find_package(Protobuf)
+  - include_directories(${Protobuf_INCLUDE_DIRS})
+  - target_link_libraries(a.out ${Protobuf_LIBRARIES} pthread)
+* network
+TCP/UDP 连接由一个五元组标识:
+{<protocol>, <src addr>, <src port>, <dest addr>, <dest port>}
+
+因为 http 服务器不保存关于客户的任何信息, 所以 http 是一个无状态协议 (stateless protocol)
+
+cookie 可以用于识别一个用户, 可以在无状态的 http 之上建立一个用户会话层
+
+最大传输单元 Maximum Transmission Unit, MTU 通常为 1500 字节, 最大报文段长度 Maximum Segment Size, MSS 通常为 1460 字节
+
+setsockopt:
+  - SO_REUSEADDR    enables local address reuse 对 time-wait 链接, 确保 server 重启成功
+  - SO_REUSEPORT    enables duplicate address and port bindings 可解决 thundering herd problem
+
++ 计算机上网需要的4个参数
+  - 本机的 IP 地址 (静态或动态)
+  - 子网掩码
+　- 网关的 IP 地址
+　- DNS 的 IP 地址
+
++ DHCP 属于 application layer, transport layer 使用 UDP
+  - UDP header 中设置发出方的端口和接收方的端口: 这一部分是 DHCP 协议规定好的, 发出方是 68 端口, 接收方是 67 端口
+  - 用于分配动态 IP 地址
+  - 中继代理 DHCP relay agent: 网关充当中继代理的角色
+  - 虚拟局域网技术 VLAN
+  - 配置 DHCP snooping 可以解决 DHCP 欺骗问题和 ARP 欺骗问题
+
++ ARP
+  - 两台主机不在同一个子网络, 只能把数据包传送到两个子网络连接处的 gateway, 让网关去处理
+  - 两台主机在同一个子网络, 可以用 ARP 协议, 得到对方的 MAC 地址
+  - ARP 协议也是发出一个数据包, 其中包含它所要查询主机的 IP 地址，在对方的 MAC 地址这一栏, 填的是 FF:FF:FF:FF:FF:FF, 表示这是一个"广播"地址
+    它所在子网络的每一台主机, 都会收到这个数据包, 从中取出 IP 地址, 与自身的 IP 地址进行比较。如果两者相同, 都做出回复, 向对方报告自己的 MAC 地址, 否则就丢弃这个包
+
+
++ 访问网站
+  - DNS 进程检查 cache, 如果没有找到, 检查本地 host 文件, 如果没有找到, 通过 DNS 服务器获取域名对应的 ip address
+  - 判断这个 IP 地址是不是在同一个子网络, 这就要用到子网掩码
+  - 是在同一个子网络: 通过广播 ARP 获取 ip 对应的 mac 地址, 不是同一子网络, MAC 地址将是网关的 MAC 地址
+  - 构建 http 数据包, 嵌在 TCP 中, 嵌在 IP 中, 嵌入以太网中, 以太网数据包的数据部分, 最大长度为1500字节
+
++ ICMP
+  - Internet Control Message Protocol
+  - new datagram: first 8 byte payload + header + type + code
+  - ping uses ICMP: echo request (type 8, code 0), echo reply (type 0, code 0)
+  - traceroute uses ICMP: find the routers from A to B
+
++ packet switch (分组交换机) 主要有两种: router (路由器), link-layer switch (链路层交换机)
+  - 每台分组交换机有多条链路与之相连, 对于每条链路,
+    该分组交换机有一个输出缓存 (output buffer), 也叫输出队列 (output queue)
+  - 每台路由器有一个转发表 (forwarding table)
+
+** tcp
+一条 TCP 连接的双方均可随机地选择初始序号, 这样做可以减少将旧连接 (使用同样的端口号 SO_REUSEADDR) 发送的报文误认为是新连接的
+
+第二次握手: 服务端发送完 SYN/ACK 后在内存中建立 SYN-RECEIVED 的连接，将连接放进 incomplete connection queue, 最大长度为 /proc/sys/net/ipv4/tcp_max_syn_backlog, 关闭 syncookies (net.ipv4.tcp_syncookies = 0), 当队列满时, 不再接受新的连接
+
+第三次握手: 服务端收到 ACK 后, TCP 连接进入 ESTABLISHED 状态, 将连接放进 complete connection queue, 等待应用程序进行 accept, 其最大长度为 listen 函数的参数 backlog, 当 sysctl_tcp_abort_on_overflow 为 0 时, Linux 内核只丢弃客户端的 ACK 包, 然后什么都不做
+
+duplicate ACK 冗余 ACK: 接收方对已经接收到的最后一个按序字节数据进行重复确认产生, 发送方一旦接受到3个冗余 ACK, TCP 就执行快速重传 (fast retransmit)
+
+丢包事件的定义: 出现超时或者收到来自接收方的3个冗余 ACK, 出现过度的拥塞时, 路径上的一台或多台路由器的缓存会溢出, 导致丢包
+
+TCP 拥塞控制被称为加性增, 乘性减 Additive-Increase, Multiplicative-Decrease AIMD
+
++ 转发和路由选择
+  - 转发 forwarding 是指分组从一个输入链路接口转移到适当的输出链路接口的路由器本地动作
+  - 路由选择 routing 是指确定分组从源到目的地所采取的的端到端路径的网络范围
+
+*** 慢启动/拥塞避免/快速恢复
+- 慢启动
+  + TCP 连接开始时, cwnd 初始值为一个 MSS, 每接收到一个 ACK 就增加一个 MSS, 这导致每过一个 RTT 就翻倍
+  + 当遇到一个 timeout 丢包事件, 设置慢启动阈值 ssthresh 为 cwnd/2, 将 cwnd 设置为 1, 重新开始慢启动过程, 当检测到 cwnd 到达 sshthresh 时, 结束慢启动并转移到拥塞避免模式
+  + 当遇到一个冗余 ACK 为 3 的丢包事件, 执行一次快速重传, cwnd 减半, 结束慢启动并进入快速恢复模式
+
+- 拥塞避免
+  + 每个 RTT 增加一个 MSS, 可通过每个 ACK 增加 1/n 个 MSS 实现
+  + 出现 timeout: ssthresh 设为 cwnd/2, cwnd 设为 1, 进入慢启动
+  + 出现 3 duplicate ack: ssthresh 设为 cwnd/2, cwnd 减半, 进入快速恢复
+
+- 快速恢复
+  + 对于每个冗余 ACK, 增加一个 MSS, 进入拥塞避免
+  + 出现 timeout: ssthresh 设为 cwnd/2, cwnd 设为 1, 进入慢启动
+
+* epoll
+** struct
+#+begin_src c
+  struct eventpoll {
+    spinlock_t lock;
+    struct mutex mtx;
+    wait_queue_head_t wq;         /* sys_epoll_wait() 使用的等待队列 */
+    wait_queue_head_t poll_wait;  /* file->epoll() 使用的等待队列 */
+    struct list_head rdllist;     /* list of ready file descriptors */
+    struct rb_root rbr; /* RB tree root used to store monitored fd structs */
+    struct epitem *ovflist;
+    struct user_struct *user;
+  };
+
+  /* epitem 表示一个被监听的 fd */
+  struct epitem {
+    struct rb_node rbn;
+    struct list_head rdllink;
+    struct epitem *next;
+    struct epoll_filefd ffd;
+    int nwait; /* number of active wait queue attached to poll operations */
+    struct list_head pwqlist;
+    struct eventpoll *ep;
+    struct list_head fllink;
+    struct epoll_event event; /* epoll_ctl */
+  };
+#+end_src
+
+** create
+从 slab 缓存中创建一个 eventpoll 对象, 并且创建一个匿名的 fd 跟 fd 对应的 file 对象
+而 eventpoll 对象保存在 struct file 结构的 private 指针中
+该 fd 对应的 file operations 实现了 poll 跟 release 操作
+#+begin_src c
+  /* File callbacks that implement the eventpoll file behaviour */
+  static const struct file_operations eventpoll_fops = {
+  #ifdef CONFIG_PROC_FS
+          .show_fdinfo	= ep_show_fdinfo,
+  #endif
+          .release		= ep_eventpoll_release,
+          .poll		= ep_eventpoll_poll,
+          .llseek		= noop_llseek,
+  };
+#+end_src
+
+** control
+将 epoll_event 结构拷贝到内核空间中
+
+ADD 操作: 创建一个与 fd 对应的 epitem 结构
+epitem 跟 socket 关联后, 当它有状态变化时, 会通过 ep_poll_callback() 来通知将 epitem 放入 ready list
+
+UDP socket 的流程:
+f_op->poll(), sock_poll(), udp_poll(), datagram_poll(), sock_poll_wait(), ep_ptable_queue_proc()
+
+#+begin_src c
+  int do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *epds,
+                   bool nonblock)
+  {
+    int error;
+    struct fd f = fdget(epfd);
+    struct eventpoll *ep = f.file->private_data;
+    struct epitem *epi = ep_find(ep, tf.file, fd);
+
+    mutex_lock(&ep->mtx);
+
+    switch (op) {
+    case EPOLL_CTL_ADD:
+      if (!epi) {
+        epds->events |= EPOLLERR | EPOLLHUP;
+        error = ep_insert(ep, epds, tf.file, fd, full_check);
+      } else
+        error = -EEXIST;
+      break;
+    case EPOLL_CTL_DEL:
+      if (epi)
+        error = ep_remove(ep, epi);
+      else
+        error = -ENOENT;
+      break;
+    case EPOLL_CTL_MOD:
+      if (epi) {
+        if (!(epi->event.events & EPOLLEXCLUSIVE)) {
+          epds->events |= EPOLLERR | EPOLLHUP;
+          error = ep_modify(ep, epi, epds);
+        }
+      } else
+        error = -ENOENT;
+      break;
+    }
+
+    mutex_unlock(&ep->mtx);
+    return error;
+  }
+#+end_src
+
+** wait
+ep_events_available 检查 ready list (rdllist) 和 ovflist 是否不为空
+为空的时候把自己加入等待队列, schedule 让出 cpu
+#+begin_src c
+  static int do_epoll_wait(int epfd, struct epoll_event __user *events,
+                           int maxevents, struct timespec64 *to)
+  {
+    error = ep_poll(ep, events, maxevents, to);
+    return error;
+  }
+
+  static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+                     int maxevents, struct timespec64 *timeout)
+  {
+    eavail = ep_events_available(ep);
+    while (1) {
+      if (eavail) {
+        res = ep_send_events(ep, events, maxevents);
+        if (res)
+          return res;
+      }
+      if (timed_out)
+        return 0;
+      eavail = ep_events_available(ep);
+      if (!eavail)
+        __add_wait_queue_exclusive(&ep->wq, &wait);
+      if (!eavail)
+        timed_out = !schedule_hrtimeout_range(to, slack, HRTIMER_MODE_ABS);
+    }
+  }
+#+end_src
+
+有 events 发生后 ep_send_events 准备数据 copy 给用户空间
+ep_item_poll 读取 events
+epoll_put_uevent 拷贝数据给用户空间
+水平触发 (level trigger) 时, 重新加入到 ready list
+#+begin_src c
+  static int ep_send_events(struct eventpoll *ep,
+                            struct epoll_event __user *events, int maxevents)
+  {
+    list_for_each_entry_safe(epi, tmp, &txlist, rdllink) {
+      revents = ep_item_poll(epi, &pt, 1);
+      events = epoll_put_uevent(revents, epi->event.data, events);
+      if (!(epi->event.events & EPOLLET)) {
+        list_add_tail(&epi->rdllink, &ep->rdllist);
+        ep_pm_stay_awake(epi);
+      }
+    }
+  }
+#+end_src
+
+* commands
+可用端口范围 sysctl -A | grep port_range
+
+查看进程的 backlog 数量 ss -anp
+
+incomplete connection 队列的数量 ss -anp | grep -c SYN_RECV
+
+docker 运行 redis 容器
+docker run --name redis1 -p 9999:6379 -v /data/redis:/data --restart=always -d redis redis-server --appendonly yes
+
+* references
+Understanding the Linux Kernel (by Daniel P. Bovet, Marco Cesati)
+
+Linux Kernel Development (by Robert Love)
+
+Linux Device Drivers (by Jonathan Corbet, Alessandro Rubini etc.)
+
+Intel® 64 and IA-32 Architectures Software Developer’s Manual (Volume 3: System Programming Guide)
+
+Structure and Interpretation of Computer Programs (by Harold Abelson, Gerald Jay Sussman)
+
+Advanced Programming in the UNIX® Environment (by W. Richard Stevens  Stephen A. Rago)
+
+Computer Systems A Programmer’s Perspective (by Randal E. Bryant, David R. O’Hallaron)

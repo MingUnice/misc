@@ -52,6 +52,18 @@ add_executable(ring_buffer_test
 ring_buffer_test.cpp
 )
 
+add_executable(trie_test
+trie_test.cpp
+)
+
+add_executable(monotonic_queue_test
+monotonic_queue_test.cpp
+)
+
+add_executable(kmp_tset
+kmp_test.cpp
+)
+
 target_link_libraries(ring_buffer_test
 pthread
 )

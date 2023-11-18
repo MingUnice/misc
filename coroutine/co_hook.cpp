@@ -253,7 +253,7 @@ int fcntl(int fd, int cmd, ...) {
   }
   case F_GETFL: {
     ret = sys_fcntl_func(fd, cmd);
-    if (info && !info->flag & O_NONBLOCK)
+    if (info && !(info->flag & O_NONBLOCK))
       ret = ret & (~O_NONBLOCK);
     break;
   }
