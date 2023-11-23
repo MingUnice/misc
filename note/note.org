@@ -989,7 +989,6 @@ __builtin_popcount() 用于计算一个 32 位无符号整数有多少个位为 
   - initialize the log file: openlog, syslog
 经过以上步骤, 这个守护进程在孤儿进程组中 (PPID 为1), 不是会话首进程 (不会被分配到一个控制终端)
 
-
 ** time
 相关 struct:
 #+begin_src c
@@ -1050,6 +1049,7 @@ convert time_t to tm as UTC time
   - include_directories(${Protobuf_INCLUDE_DIRS})
   - target_link_libraries(a.out ${Protobuf_LIBRARIES} pthread)
 * network
+** base
 TCP/UDP 连接由一个五元组标识:
 {<protocol>, <src addr>, <src port>, <dest addr>, <dest port>}
 
@@ -1084,7 +1084,8 @@ setsockopt:
 
 
 + 访问网站
-  - DNS 进程检查 cache, 如果没有找到, 检查本地 host 文件, 如果没有找到, 通过 DNS 服务器获取域名对应的 ip address
+  - 检查本地 /etc/hosts 文件
+  - 通过 DNS 服务器 (systemd-resolved /etc/resolve.conf) 获取域名对应的 ip address
   - 判断这个 IP 地址是不是在同一个子网络, 这就要用到子网掩码
   - 是在同一个子网络: 通过广播 ARP 获取 ip 对应的 mac 地址, 不是同一子网络, MAC 地址将是网关的 MAC 地址
   - 构建 http 数据包, 嵌在 TCP 中, 嵌在 IP 中, 嵌入以太网中, 以太网数据包的数据部分, 最大长度为1500字节
@@ -1101,26 +1102,136 @@ setsockopt:
   - 每台路由器有一个转发表 (forwarding table)
 
 ** tcp
+
+MSS (Maximun Segment Size), MTU (Maximun Transmission Unit)
+MSS = MTU - 40 = 1460
+
 一条 TCP 连接的双方均可随机地选择初始序号, 这样做可以减少将旧连接 (使用同样的端口号 SO_REUSEADDR) 发送的报文误认为是新连接的
 
-第二次握手: 服务端发送完 SYN/ACK 后在内存中建立 SYN-RECEIVED 的连接，将连接放进 incomplete connection queue, 最大长度为 /proc/sys/net/ipv4/tcp_max_syn_backlog, 关闭 syncookies (net.ipv4.tcp_syncookies = 0), 当队列满时, 不再接受新的连接
+第二次握手: 服务端发送完 SYN/ACK 后在内存中建立 SYN-RECEIVED 的连接，将连接放进 incomplete connection queue
+最大长度为 /proc/sys/net/ipv4/tcp_max_syn_backlog
+关闭 syncookies (net.ipv4.tcp_syncookies = 0), 当队列满时, 不再接受新的连接
 
-第三次握手: 服务端收到 ACK 后, TCP 连接进入 ESTABLISHED 状态, 将连接放进 complete connection queue, 等待应用程序进行 accept, 其最大长度为 listen 函数的参数 backlog, 当 sysctl_tcp_abort_on_overflow 为 0 时, Linux 内核只丢弃客户端的 ACK 包, 然后什么都不做
+第三次握手: 服务端收到 ACK 后, TCP 连接进入 ESTABLISHED 状态, 将连接放进 complete connection queue
+等待应用程序进行 accept, 其最大长度为 listen 函数的参数 backlog
+当 sysctl_tcp_abort_on_overflow 为 0 时, Linux 内核只丢弃客户端的 ACK 包, 然后什么都不做
+
+qlen 半连接队列大小, rskq_accept_head 全连接队列头
+收到 SYN : qlen++, yound++
+收到 ACK : qlen--, yound--, 加入全连接队列
+调用 accept : 全连接队列中取出
+#+begin_src c
+  struct request_sock_queue {
+    spinlock_t		rskq_lock;
+    u8			rskq_defer_accept;
+
+    u32			synflood_warned;
+    atomic_t		qlen;
+    atomic_t		young;
+
+    struct request_sock	*rskq_accept_head;
+    struct request_sock	*rskq_accept_tail;
+    struct fastopen_queue	fastopenq; /* Check max_qlen != 0 to determine
+                                       * if TFO is enabled.
+                                       */
+  };
+#+end_src
+
+收到 SYN 时, 比较两个队列是否已满
+#+begin_src c
+  int tcp_conn_request(struct request_sock_ops *rsk_ops,
+                       const struct tcp_request_sock_ops *af_ops,
+                       struct sock *sk, struct sk_buff *skb)
+  {
+    /* ...... */
+    if ((net->ipv4.sysctl_tcp_syncookies == 2 ||
+         inet_csk_reqsk_queue_is_full(sk)) && !isn) {
+      want_cookie = tcp_syn_flood_action(sk, rsk_ops->slab_name);
+      if (!want_cookie)
+        goto drop;
+    }
+
+    if (sk_acceptq_is_full(sk)) {
+      NET_INC_STATS(sock_net(sk), LINUX_MIB_LISTENOVERFLOWS);
+      goto drop;
+    }
+    /* ...... */
+  }
+
+  static inline int inet_csk_reqsk_queue_is_full(const struct sock *sk)
+  {
+    return inet_csk_reqsk_queue_len(sk) >= sk->sk_max_ack_backlog;
+  }
+
+  static inline int reqsk_queue_len(const struct request_sock_queue *queue)
+  {
+    return atomic_read(&queue->qlen);
+  }
+
+  static inline bool sk_acceptq_is_full(const struct sock *sk)
+  {
+    return READ_ONCE(sk->sk_ack_backlog) > READ_ONCE(sk->sk_max_ack_backlog);
+  }
+#+end_src
+
+收到 ACK 时, 比较全连接队列是否已满
+#+begin_src c
+  struct sock *tcp_v4_syn_recv_sock(const struct sock *sk, struct sk_buff *skb,
+                                    struct request_sock *req,
+                                    struct dst_entry *dst,
+                                    struct request_sock *req_unhash,
+                                    bool *own_req)
+  {
+    /* ...... */
+    if (sk_acceptq_is_full(sk))
+      goto exit_overflow;
+    /* ...... */
+  }
+#+end_src
+
+syn cookie
+服务器在收到客户端的 SYN 时不分配资源保存客户端信息
+将这些信息保存在 SYN+ACK 的初始序号和时间戳中
+这些信息会随着 ACK 报文被带回来
 
 duplicate ACK 冗余 ACK: 接收方对已经接收到的最后一个按序字节数据进行重复确认产生, 发送方一旦接受到3个冗余 ACK, TCP 就执行快速重传 (fast retransmit)
 
+TCP Retransmission Timeout (RTO)
+TCP_RTO_MIN (200ms), TCP_RTO_MAX (120s)
+sysctl_tcp_retries2: 初始 RTO 为 200ms 时的最大重传次数
+
 丢包事件的定义: 出现超时或者收到来自接收方的3个冗余 ACK, 出现过度的拥塞时, 路径上的一台或多台路由器的缓存会溢出, 导致丢包
 
-TCP 拥塞控制被称为加性增, 乘性减 Additive-Increase, Multiplicative-Decrease AIMD
+转发和路由选择
+转发 forwarding 是指分组从一个输入链路接口转移到适当的输出链路接口的路由器本地动作
+路由选择 routing 是指确定分组从源到目的地所采取的的端到端路径的网络范围
 
-+ 转发和路由选择
-  - 转发 forwarding 是指分组从一个输入链路接口转移到适当的输出链路接口的路由器本地动作
-  - 路由选择 routing 是指确定分组从源到目的地所采取的的端到端路径的网络范围
+delayed ack
+接收方会把 ack 合并到下条消息中, 除非在 200ms 内没有下条消息
 
-*** 慢启动/拥塞避免/快速恢复
+Nagle
+当 TCP 连接有尚未确认的未完成数据时, 无法发送小数据段 (小于 SMSS), 会进行合并
+
+TCP 有 keepalive 机制, 通过传递心跳包来检测空闲的连接是死亡还是存活
+默认情况下在超过 tcp_keepalive_time (默认2小时) 的时间连接没有数据包的传输, TCP 就认为这是个空闲 (idle) 的连接
+然后开始每隔 tcp_keepalive_intvl (默认75ms) 发送消息检测连接是否存活, 一共发送 tcp_keepalive_probes (默认9) 次
+
+TCP Segment Offload
+网卡来进行 tcp 分段
+
+timestamp
+用于计算 RTT (round-trip-time) 和防止陈旧报文的干扰
+最大 MSL 为 255s, 32-bit 的时钟 tick 必须大于 59ns
+PAWS (Protection Against Wrapped Sequences) 防止序号回绕
+
+*** 拥塞控制
+TCP 拥塞控制被称为加性增, 乘性减 Additive-Increase, Multiplicative-Decrease (AIMD)
+
+拥塞窗口 (cwnd) 是一个 TCP 状态变量，用于限制 TCP 在收到 ACK 之前可以发送到网络的数据量
+
 - 慢启动
   + TCP 连接开始时, cwnd 初始值为一个 MSS, 每接收到一个 ACK 就增加一个 MSS, 这导致每过一个 RTT 就翻倍
-  + 当遇到一个 timeout 丢包事件, 设置慢启动阈值 ssthresh 为 cwnd/2, 将 cwnd 设置为 1, 重新开始慢启动过程, 当检测到 cwnd 到达 sshthresh 时, 结束慢启动并转移到拥塞避免模式
+  + 当遇到一个 timeout 丢包事件, 设置慢启动阈值 ssthresh 为 cwnd/2, 将 cwnd 设置为 1, 重新开始慢启动过程, 当检测到 cwnd 到达 ssthresh 时, 结束慢启动并转移到拥塞避免模式
   + 当遇到一个冗余 ACK 为 3 的丢包事件, 执行一次快速重传, cwnd 减半, 结束慢启动并进入快速恢复模式
 
 - 拥塞避免
@@ -1131,6 +1242,37 @@ TCP 拥塞控制被称为加性增, 乘性减 Additive-Increase, Multiplicative-
 - 快速恢复
   + 对于每个冗余 ACK, 增加一个 MSS, 进入拥塞避免
   + 出现 timeout: ssthresh 设为 cwnd/2, cwnd 设为 1, 进入慢启动
+
+ABC (Appropriate Byte Counting)
+慢启动和拥塞避免中对 ACK 个数的判断改为对 ACK 消息长度的判断
+
+** netfilter
+netfilter 两大基本功能: 报文过滤和连接跟踪
+
+有5个 hook 点: 路由前, 本地接收, 转发, 本地发送, 路由后
+#+begin_src c
+enum nf_inet_hooks {
+	NF_INET_PRE_ROUTING,
+	NF_INET_LOCAL_IN,
+	NF_INET_FORWARD,
+	NF_INET_LOCAL_OUT,
+	NF_INET_POST_ROUTING,
+	NF_INET_NUMHOOKS,
+	NF_INET_INGRESS = NF_INET_NUMHOOKS,
+};
+#+end_src
+如本机接收 IPv4 的报文时调用路由前的 hook
+#+begin_src c
+  int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt,
+             struct net_device *orig_dev)
+  {
+    /* ...... */
+    return NF_HOOK(NFPROTO_IPV4, NF_INET_PRE_ROUTING,
+                   net, NULL, skb, dev, NULL, ip_rcv_finish);
+  }
+#+end_src
+
+连接跟踪会将连接跟踪信息保存在skb->nfctinfo
 
 * epoll
 ** struct
@@ -1278,14 +1420,18 @@ epoll_put_uevent 拷贝数据给用户空间
 #+end_src
 
 * commands
-可用端口范围 sysctl -A | grep port_range
+sysctl -A | grep port_range : 可用端口范围
 
-查看进程的 backlog 数量 ss -anp
+netstat -l / ss -l : (listen) Send-Q 表示全连接队列大小的最大值, Recv-Q 表示全连接队列的使用大小
 
-incomplete connection 队列的数量 ss -anp | grep -c SYN_RECV
+netstat -t / ss : (established) Send-Q 表示发送队列中没有被远程主机确认的 bytes, Recv-Q 表示在缓存中没被进程读取 bytes
+
+netstat -s : the listen queue of a socket overflowed 全连接队列溢出次数, SYNs to LISTEN sockets dropped 半连接队列溢出次数
 
 docker 运行 redis 容器
 docker run --name redis1 -p 9999:6379 -v /data/redis:/data --restart=always -d redis redis-server --appendonly yes
+
+curl https://ipinfo.io/ip : 查看公网 IP
 
 * references
 Understanding the Linux Kernel (by Daniel P. Bovet, Marco Cesati)

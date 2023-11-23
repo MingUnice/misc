@@ -5,5 +5,6 @@
 #include "deal_file_lines.h"
 #include "get_time.h"
 #include "split_string.h"
+#include "singleton.h"
 
 #endif

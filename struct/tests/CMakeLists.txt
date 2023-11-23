@@ -64,6 +64,10 @@ add_executable(kmp_tset
 kmp_test.cpp
 )
 
+add_executable(lru_tset
+lru_test.cpp
+)
+
 target_link_libraries(ring_buffer_test
 pthread
 )
