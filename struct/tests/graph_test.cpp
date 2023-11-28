@@ -23,5 +23,9 @@ int main(int argc, char *argv[])
   printf("\n");
   printf("%d\n", graph.MinSpanningTreePrim());
   printf("%d\n", graph.MinSpanningTreeKruskal());
+  std::vector<int> top_sort_res;
+  graph.TopologicalSort(top_sort_res);
+  for (auto i : top_sort_res)
+    printf("%d\n", i);
   return 0;
 }

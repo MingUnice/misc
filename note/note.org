@@ -125,7 +125,14 @@ RMW(Read-Modifiy-Write) 可能是非原子的, 使用 volatile 关键字使变�
 #+end_src
 
 CPU 级别的屏障保证实际执行的顺序是按照程序文本的顺序, 同时保证了多 CPU 间的缓存一致性
+
+写内存屏障 sfence (store barrier) 将 store buffer 中的值刷入 cache line
+读内存屏障 lfence (load barrier) 将 invalidate queue 中的值清理
+
 x86 Total Store Order 下没有 store-store, load-store 和 load-load 乱序, 故我们只需要考虑 store-load 乱序
+x86 Total 中的 store buffer 被设计成了 FIFO, 所以不需要 store-store barrier
+同时 x86 没有 invalidate queue, 所以不需要 load-store 和 load-load barrier 来消费 invalidate queue 中的数据
+store-load barrier 使用 mfence 消费 store-buffer 中的数据,  lock 前缀的相关指令也能起到和 mfence 一样的效果
 
 #+begin_src c
   #if defined(__i386__)

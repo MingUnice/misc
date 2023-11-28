@@ -11,7 +11,8 @@ struct Graph {
   
   int MinSpanningTreePrim();
   int MinSpanningTreeKruskal();
-
+  bool TopologicalSort(std::vector<int> &ret);
+  
   size_t nodes_num;
   
   // edge list: edges[i][0]: u, edges[i][1]: v, edges[i][2]: weight

@@ -68,3 +68,33 @@ int Graph::MinSpanningTreeKruskal()
   }
   return cost;
 }
+
+bool Graph::TopologicalSort(std::vector<int> &ret)
+{
+  std::vector<std::vector<int>> adj_list(nodes_num);
+  std::vector<int> in_degree(nodes_num);
+  for(const auto &e : edge_list) {
+    int u = e[0];
+    int v = e[1];
+    adj_list[u].emplace_back(v);
+    in_degree[v]++;
+  }
+  std::queue<int> q;
+  for (int i = 0; i < nodes_num; ++i) {
+    if (in_degree[i] == 0)
+      q.push(i);
+  }
+  int visited = 0;
+  while (!q.empty()) {
+    int u = q.front();
+    q.pop();
+    visited++;
+    for (auto v : adj_list[u]) {
+      if (--in_degree[v] == 0)
+        q.push(v);
+    }
+  }
+  if (visited != nodes_num)
+    return false;
+  return true;
+}

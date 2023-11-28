@@ -68,6 +68,18 @@ add_executable(lru_tset
 lru_test.cpp
 )
 
+add_executable(segment_tree_tset
+segment_tree_test.cpp
+)
+
+add_executable(sort_test
+sort_test.cpp
+)
+
 target_link_libraries(ring_buffer_test
+pthread
+)
+
+target_link_libraries(sort_test
 pthread
 )
