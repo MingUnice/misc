@@ -1,0 +1,141 @@
+* dfs
+gen parentheses
+combination sum
+permutation
+subset
+word search
+path sum III
+
+* sort and find
+closest room
+min interval include query
+
+* priority queue
+min interval include query
+merge sorted lists
+sort list
+
+* stack
+evaluate postfix notation
+min stack
+decode str
+daily temp
+
+* lists
+reverse nodes group
+remove dup list
+partition list
+list cycle
+sort list
+
+* heap
+nth_element
+
+* monotonic queue
+sliding window max
+
+* tree
+tree max path sum
+tree right side view
+lowest common ancestor tree
+path sum III
+
+* fenwick tree
+min after adj swap
+cost instruction insert
+
+* sliding window
+str str
+longest happy prefix
+
+* dp
+edit distance
+triangle
+buy and sell IV
+word break
+dungeon game
+house robber
+perfect square
+coin change
+partition subset sum
+longest common subseq
+stone game IV
+min cost cut stick
+min day eat oranges
+count all routes
+stone game VII
+jump game VI
+
+* binary selection
+search matrix
+min day make bouquets
+sell colored balls
+
+* prefix sum
+subarray sum
+num subarray odd sum
+longest awesome substr
+num way make fair array
+stone game VII
+
+* math
+single num II
+single num III
+
+* topological sort
+course schedule
+
+* merge interval
+merge intervals
+partition labels
+
+* disjoint set union
+annagrams group
+pseudo critical edges mst
+
+* dsu
+max edges remove keep connect
+
+* sync
+print in order
+
+* nCr
+num way get same bst
+num way split str
+
+* other
+len longest substr
+three sum
+multiply str
+jump game I
+jump game II
+text justify
+buy and sell
+max product subarray
+find min rorated array
+rotate array
+num island
+course schedule
+product array except self
+h index
+rotting oranges
+longest subarray after delete
+pair sum divisible
+num subseq satisfy target
+count submatrices
+min diff after three move
+num substr
+num same label sub tree
+num good split str
+min num incr subarray
+min suffix flips
+kth missing positive
+can convert str
+min insert balance parentheses
+max len positive product
+min day disconnect islands
+shortest subarray remove make sorted
+num way sqaure equal product
+min remove make freq unique
+min num make moutain
+num tuple same product
