@@ -3,7 +3,8 @@
 bool winnerSquareGame(int n)
 {
   vector<int> cache(n + 1, 0);
-  function<int(int)> f = [&](int n) {
+  function<int(int)> f = [&](int n)
+  {
     if (n == 0) return -1;
     if (cache[n]) return cache[n];
 
