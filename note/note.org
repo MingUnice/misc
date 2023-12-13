@@ -1208,6 +1208,15 @@ qlen 半连接队列大小, rskq_accept_head 全连接队列头
   }
 #+end_src
 
+syn 丢失后客户端会重传 syn
+syn/ack 丢失后服务端会重传 syn/ack 客户端会重传 syn
+ack 丢失后服务端会重传 syn/ack
+每次重传后下次重传时间间隔翻倍
+#+begin_src sh
+cat /proc/sys/net/ipv4/tcp_syn_retries
+cat /proc/sys/net/ipv4/tcp_synack_retries
+#+end_src
+
 syn cookie
 服务器在收到客户端的 SYN 时不分配资源保存客户端信息
 将这些信息保存在 SYN+ACK 的初始序号和时间戳中
@@ -1242,6 +1251,30 @@ timestamp
 用于计算 RTT (round-trip-time) 和防止陈旧报文的干扰
 最大 MSL 为 255s, 32-bit 的时钟 tick 必须大于 59ns
 PAWS (Protection Against Wrapped Sequences) 防止序号回绕
+
+MSL 通常为30s, TTL 通常为64个路由
+time wait 为 2MSL, 保证该连接的报文不会影响下个连接, 保证被动关闭方正确关闭
+
+close or shutdown a socket
+close 关闭 socket 的读写, 发送 RST
+shutdown 关闭 socket 的读/写/读写, 关闭写的时候发送 FIN
+
+被动关闭方收到 FIN 后回复 ACK, 然后在读缓冲中加入 EOF, read 读到 EOF 后返回0
+然后将要发送的数据发送完后发送 FIN
+开启了 delayed ack 且没有数据要发送时 FIN 和 ACK 会合并
+
+fin 丢失后重传 fin
+每次重传后下次重传时间间隔翻倍
+#+begin_src sh
+cat /proc/sys/net/ipv4/tcp_orphan_retries
+#+end_src
+
+syn sent -> established
+listen -> syn recv -> established
+
+fin wait 1 -> fin wait 2 -> time wait -> close
+close wait -> last ack -> close
+
 
 *** 拥塞控制
 TCP 拥塞控制被称为加性增, 乘性减 Additive-Increase, Multiplicative-Decrease (AIMD)
@@ -1451,6 +1484,8 @@ docker 运行 redis 容器
 docker run --name redis1 -p 9999:6379 -v /data/redis:/data --restart=always -d redis redis-server --appendonly yes
 
 curl https://ipinfo.io/ip : 查看公网 IP
+
+ps -efL 查看进程, 前4列为 UID PID PPID LWP
 
 * references
 Understanding the Linux Kernel (by Daniel P. Bovet, Marco Cesati)
