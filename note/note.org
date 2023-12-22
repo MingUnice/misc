@@ -959,6 +959,7 @@ cpu_capacity 表示 cpu 可用于 cfs 任务的算力, 会经常更新
 #+end_src
 
 PELT(Per-Entity Load Tracking) 算法跟踪每个调度实体的负载
+
 * c/cpp
 模板全特化后需要显式指定模板实参
 
@@ -1353,6 +1354,29 @@ enum nf_inet_hooks {
     struct epoll_event event; /* epoll_ctl */
   };
 #+end_src
+
+*** eventpoll 等待队列 wq 和 poll_wait
+wq 等待队列保存对这个 eventpoll 调用 epoll_wait() 的所有进程
+
+poll_wait 等待队列处理递归唤醒:
+epollfd1 监视了 2 个非 epoll类型的 fd
+epollfd2 监视了 epollfd1 和 2 个非 epoll类型的 fd
+如果 epollfd1 所监视的 2 个 fd 中有可读事件触发
+fd 的 ep_poll_callback 回调函数会触发将 fd 放到 epollfd1 的 rdllist 中
+此时 epollfd1 本身的可读事件也会触发
+就需要从 epollfd1 的 poll_wait 等待队列中找到 epollfd2
+调用 epollfd1 的 ep_poll_callback(将 epollfd1 放到 epollfd2 的 rdllist 中)
+
+*** eventpoll ovflist
+ovflist 在 rdllist 被占用时, 用来在不持有 ep->lock 的情况下收集有就绪事件的 fd
+
+*** eventpoll lock 和 mtx
+lock:  because we manipulate objects from inside the poll callback, that might be triggered from a wake_up() that in turn might be called from IRQ context. So we can't sleep inside the poll callback and hence we need a spinlock
+
+mtx: 用于 rdllist 或红黑树的访问
+
+*** epitem pwqlist
+存放 eppoll_entry, eppoll_entry 去调用 ep_poll_callback()
 
 ** create
 从 slab 缓存中创建一个 eventpoll 对象, 并且创建一个匿名的 fd 跟 fd 对应的 file 对象

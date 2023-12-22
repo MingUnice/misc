@@ -36,30 +36,28 @@ struct DSU {
 };
 
 
-  int numSimilarGroups(vector<string>& strs)
-  {
-    const size_t n = strs.size();
-    auto str_similar = [](const std::string &lhs,
-                           const std::string &rhs) -> bool {
-      const size_t nstr = lhs.size();
-      int diff = 0;
-      for (int i = 0; i < nstr; ++i) {
-        if (lhs[i] != rhs[i]) diff++;
-        if (diff > 2) return false;
-      }
-      return true;
-    };
-    DSU dsu(n);
-    for (int i = 0; i < n; ++i) {
-      for (int j = i + 1; j < n; ++j) {
-        if (str_similar(strs[i], strs[j]))
-          dsu.Merge(i, j);
-      }
+int numSimilarGroups(vector<string>& strs)
+{
+  const size_t n = strs.size();
+  auto str_similar = [](const std::string &lhs,
+                        const std::string &rhs) -> bool {
+                                                         const size_t nstr = lhs.size();
+                                                         int diff = 0;
+                                                         for (int i = 0; i < nstr; ++i) {
+                                                           if (lhs[i] != rhs[i]) diff++;
+                                                           if (diff > 2) return false;
+                                                         }
+                                                         return true;
+  };
+  DSU dsu(n);
+  for (int i = 0; i < n; ++i) {
+    for (int j = i + 1; j < n; ++j) {
+      if (str_similar(strs[i], strs[j]))
+        dsu.Merge(i, j);
     }
-    return n - dsu.edge_;
   }
-
-
+  return n - dsu.edge_;
+}
 
 // Two strings, X and Y, are considered similar if either they are identical or we can make them equivalent by swapping at most two letters (in distinct positions) within the string X.
 

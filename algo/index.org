@@ -37,6 +37,8 @@ sliding window max
 jump game VI
 jump game VII
 
+* monotonic stack
+next greater list node
 * tree
 tree max path sum
 tree right side view
@@ -78,6 +80,7 @@ stone game IV
 stone game V
 stone game VII
 stone game VIII
+longest arithmetic subseq
 
 * binary selection
 search matrix
