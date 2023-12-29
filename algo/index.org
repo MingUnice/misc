@@ -4,6 +4,7 @@ combination sum
 permutation
 subset
 word search
+word search II
 path sum III
 jump game III
 
@@ -81,6 +82,8 @@ stone game V
 stone game VII
 stone game VIII
 longest arithmetic subseq
+combination sum IV
+bookcase_shelves
 
 * binary selection
 search matrix
@@ -98,6 +101,7 @@ min num move balls
 * math
 single num II
 single num III
+sum two integers
 
 * topological sort
 course schedule
@@ -123,6 +127,9 @@ num way split str
 
 * Trie
 prefix score str
+
+* bfs
+sliding puzzle
 
 * other
 len longest substr

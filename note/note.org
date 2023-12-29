@@ -257,6 +257,11 @@ reverse mapping 时分别从 address_space 和 anon_vma 中找到 PTE
 为了防止 copy on write 导致 anonymous pages 的 reverse mapping 性能下降
 采用了 per process 的 anon_vma_chain 来辅助
 
+- 私有 page cache: 进程加载的动态链接库, 使用 copy on write, 需要修改时才复制出新的内存
+- 共享 page cache: 不同进程读写同一文件
+- 私有 anonymous pages: 进程的 heap, stack
+- 共享 anonymous pages: 共享内存
+
 ** page reclaim
 内存回收根据 page 是 anonymous/file 和 activity, 将 page 分到了4个链表中:
 inactive_anon, active_anon, inactive_file, active_file
@@ -961,6 +966,19 @@ cpu_capacity 表示 cpu 可用于 cfs 任务的算力, 会经常更新
 PELT(Per-Entity Load Tracking) 算法跟踪每个调度实体的负载
 
 * c/cpp
+clz, ctz, popcount
+clz 前导0个数, ctz 后置0个数, popcount 1的个数
+gcc 中使用 __builtin_clz, __builtin_ctz, __builtin_popcount
+
+placement new 利用已分配好的内存, 并调用构造函数
+#+begin_src c++
+  void* operator new(std::size_t, void*);
+#+end_src
+
+编译器会给每一个包含虚函数或继承了虚函数的类自动建立一个虚函数表
+
+introsort = quick sort + heap sort + insertion sort
+
 模板全特化后需要显式指定模板实参
 
 substring 连续的子串 subsequeue 非连续的

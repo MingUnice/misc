@@ -17,6 +17,7 @@ Graph::Graph(const std::vector<std::vector<int>> &edges, size_t nodes)
   }
 }
 
+// 优先队列
 int Graph::MinSpanningTreePrim()
 {
   int cost = 0;
@@ -41,6 +42,7 @@ int Graph::MinSpanningTreePrim()
   return cost;
 }
 
+// 排序加并查集
 int Graph::MinSpanningTreeKruskal()
 {
   int cost = 0;
