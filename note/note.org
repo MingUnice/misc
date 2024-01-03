@@ -758,6 +758,16 @@ CR3.PWT Page-level Write-Through
 CR4.LA57 57-bit linear addresses 使用5级分页或者4级分页
 CR4.PCIDE PCID-Enable Bit
 * task management
+判断当前线程是内核线程还是用户线程:
+#+begin_src c
+  struct task_struct {
+    struct mm_struct *mm;
+    struct mm_struct *active_mm;
+  }
+#+end_src
+
+mm 为空的即为内核线程, 内核线程的 active_mm 是借用用户线程的
+
 task 分为实时和非实时:
 #+begin_src c
   static inline bool task_is_realtime(struct task_struct *tsk)
@@ -777,6 +787,7 @@ task 分为实时和非实时:
 mm_struct 有两个计数器 mm_users 记录真实用户(用户进程), mm_count 记录真实用户(用户进程)和匿名用户(内核进程)
 
 mm_users 通过 mmget()/mmput() 修改, mm_count 通过 mmgrab()/mmdrop() 修改
+
 ** schedule
 调度指标 (sheduling policy)
   - turnaround time 周转时间, 任务完成时间减去到达时间
@@ -966,6 +977,10 @@ cpu_capacity 表示 cpu 可用于 cfs 任务的算力, 会经常更新
 PELT(Per-Entity Load Tracking) 算法跟踪每个调度实体的负载
 
 * c/cpp
+多态类的 typeinfo 由其 vtable 指向
+
+enable_shared_from_this 使用 CRTP 实现 shared_from_this, 使得使用 this 指针时正确地增加 use_count
+
 clz, ctz, popcount
 clz 前导0个数, ctz 后置0个数, popcount 1的个数
 gcc 中使用 __builtin_clz, __builtin_ctz, __builtin_popcount
@@ -1005,8 +1020,6 @@ scoped_lock 防止死锁
 
 在一条表达式中如有未定义执行顺序的 operators 如 int i = f1() * f2();
 我们不能确定 f1() 和 f2() 哪个先执行, 会造成 has undefined behavior
-
-__builtin_popcount() 用于计算一个 32 位无符号整数有多少个位为 1
 
 函数体内部的 static 变量：作用域在函数体内, 只分配一次, 多线程下, 所有调用这个函数的线程使用的是同一个 static 变量
 
@@ -1077,6 +1090,46 @@ convert time_t to tm as UTC time
 #+begin_src c
   struct tm *gmtime (const time_t *timer);
 #+end_src
+
+进程用时分为实际时间(Real) 用户 CPU 时间(User) 系统 CPU 时间(Sys)
+User 和 Sys 通过wait (2) 或 times (2) Real 通过 gettimeofday (2)
+times 得到的 CPU 时间包括所有线程和调用了 wait 的进程
+
+rusage 结构体中也存了 User 和 Sys, 通过 getrusage (2) 或 wait4 (2) 获取
+#+begin_src c
+  struct rusage {
+                 struct timeval ru_utime; /* user CPU time used */
+                 struct timeval ru_stime; /* system CPU time used */
+                 long   ru_maxrss;        /* maximum resident set size */
+                 long   ru_ixrss;         /* integral shared memory size */
+                 long   ru_idrss;         /* integral unshared data size */
+                 long   ru_isrss;         /* integral unshared stack size */
+                 long   ru_minflt;        /* page reclaims (soft page faults) */
+                 long   ru_majflt;        /* page faults (hard page faults) */
+                 long   ru_nswap;         /* swaps */
+                 long   ru_inblock;       /* block input operations */
+                 long   ru_oublock;       /* block output operations */
+                 long   ru_msgsnd;        /* IPC messages sent */
+                 long   ru_msgrcv;        /* IPC messages received */
+                 long   ru_nsignals;      /* signals received */
+                 long   ru_nvcsw;         /* voluntary context switches */
+                 long   ru_nivcsw;        /* involuntary context switches */
+             };
+
+  int getrusage(int who, struct rusage *usage);
+
+  pid_t wait4(pid_t pid, int *wstatus, int options, struct rusage *rusage);
+#+end_src
+
+clock_gettime 可以指定线程或进程, 获取挂钟时间
+CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID
+#+begin_src c
+  int pthread_getcpuclockid(pthread_t thread, clockid_t *clock_id);
+
+  int clock_gettime(clockid_t clk_id, struct timespec *tp);
+#+end_src
+
+
 ** cmake
 - 添加编译选项: add_compile_options(-g -O0 -std=c++17 -D_DEBUG -D__LINUX__ -Wno-enum-compare)
 - 获取父目录: get_filename_component(PARENT_DIR ${PROJECT_SOURCE_DIR} DIRECTORY)
@@ -1086,6 +1139,7 @@ convert time_t to tm as UTC time
   - find_package(Protobuf)
   - include_directories(${Protobuf_INCLUDE_DIRS})
   - target_link_libraries(a.out ${Protobuf_LIBRARIES} pthread)
+
 * network
 ** base
 TCP/UDP 连接由一个五元组标识:
@@ -1459,6 +1513,22 @@ f_op->poll(), sock_poll(), udp_poll(), datagram_poll(), sock_poll_wait(), ep_pta
 
     mutex_unlock(&ep->mtx);
     return error;
+  }
+#+end_src
+
+插入到 rbr 时用到的键为 epitem 的 ffd
+#+begin_src c
+  struct epoll_filefd {
+  	  struct file *file;
+	  int fd;
+  } __packed;
+
+  /* Compare RB tree keys */
+  static inline int ep_cmp_ffd(struct epoll_filefd *p1,
+                               struct epoll_filefd *p2)
+  {
+          return (p1->file > p2->file ? +1:
+                  (p1->file < p2->file ? -1 : p1->fd - p2->fd));
   }
 #+end_src
 
