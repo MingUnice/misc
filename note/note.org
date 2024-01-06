@@ -788,6 +788,17 @@ mm_struct 有两个计数器 mm_users 记录真实用户(用户进程), mm_count
 
 mm_users 通过 mmget()/mmput() 修改, mm_count 通过 mmgrab()/mmdrop() 修改
 
+孤儿进程: 一个父进程退出, 而它的一个或多个子进程还在运行, 那么那些子进程将成为孤儿进程, 孤儿进程将被 init 进程(进程号为1)所收养, 并由init进程对它们完成状态收集工作
+
+僵尸进程: 一个进程使用fork创建子进程, 如果子进程退出, 而父进程并没有调用 wait 或 waitpid 获取子进程的状态信息, 那么子进程的进程描述符仍然保存在系统中, 这种进程称之为僵死进程
+
+进程状态:
+R Running 正在运行或者在 running queue 中
+D Disk Sleep 正在不可中断睡眠中
+S Interruptible Sleep 正在可中断睡眠中
+Z Zombie 僵尸进程
+I Idle 空闲状态, 没有负载的不可中断睡眠的内核线程
+
 ** schedule
 调度指标 (sheduling policy)
   - turnaround time 周转时间, 任务完成时间减去到达时间
@@ -977,6 +988,9 @@ cpu_capacity 表示 cpu 可用于 cfs 任务的算力, 会经常更新
 PELT(Per-Entity Load Tracking) 算法跟踪每个调度实体的负载
 
 * c/cpp
+link: -fvisibility=hidden 或 --version-script 控制库中符号的可见性
+
+
 多态类的 typeinfo 由其 vtable 指向
 
 enable_shared_from_this 使用 CRTP 实现 shared_from_this, 使得使用 this 指针时正确地增加 use_count
@@ -1039,6 +1053,20 @@ scoped_lock 防止死锁
   - attach file descriptors 0, 1, and 2 to /dev/null: open("/dev/null", O_RDWR)
   - initialize the log file: openlog, syslog
 经过以上步骤, 这个守护进程在孤儿进程组中 (PPID 为1), 不是会话首进程 (不会被分配到一个控制终端)
+
+通过指向基类的指针删除对象会引发未定义行为, 除非基类的析构函数是虚函数
+#+begin_src c++
+  class Base
+  {
+  public:
+      virtual ~Base() {}
+  };
+
+  class Derived : public Base {};
+
+  Base* b = new Derived;
+  delete b;
+#+end_src
 
 ** time
 相关 struct:
@@ -1139,6 +1167,134 @@ CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID
   - find_package(Protobuf)
   - include_directories(${Protobuf_INCLUDE_DIRS})
   - target_link_libraries(a.out ${Protobuf_LIBRARIES} pthread)
+
+
+** copy and move
+copy constructor
+move constructor
+copy assignment
+move assignment
+
+- 350法则
+  要实现类的用户定义拷贝语义需要同时实现 destructor, copy constructor, copy assignment
+  要实现类的用户定义移动语义需要同时实现 destructor, copy constructor, copy assignment, move constructor, move assignment
+  要使用隐式的这5个函数, 不能定义任一用户定义的其中一种
+
+- 复制消除
+  省略复制及移动构造函数, 导致零复制的按值传递语义
+
+- lvalue, xvalue, prvalue
+  拥有身份且不可被移动的表达式被称作左值 (lvalue) 表达式
+  拥有身份且可被移动的表达式被称作亡值 (xvalue) 表达式
+  不拥有身份且可被移动的表达式被称作纯右值 (prvalue) 表达式
+
+  拥有身份的表达式被称作泛左值 (glvalue) 表达式, 左值和亡值都是泛左值表达式
+  可被移动的表达式被称作右值 (rvalue) 表达式, 纯右值和亡值都是右值表达式
+
+  lvalue 和 xvalue 具有多态, prvalue 不具有多态
+
+  右值引用变量在用于表达式时是左值
+  #+begin_src c++
+    int&& x = 1;
+    f(x);            // 调用 f(int& x)
+    f(std::move(x)); // 调用 f(int&& x)
+  #+end_src
+
+  #+begin_src c++
+    #include <utility>
+    #include <sstream>
+
+    struct S {
+      int mi;
+      const std::pair<int,int>& mp; // 引用成员
+    };
+
+    void foo(int) {}
+
+    struct A {
+      virtual void print() const { printf("A\n"); }
+    };
+
+    struct B : A
+    {
+      int n;
+      operator int&() { return n; };
+      virtual void print() const { printf("B\n"); }
+    };
+
+    B bar() { return B(); }
+
+    //int& bad_r;      // 错误：没有初始化器
+    extern int& ext_r; // OK
+
+    int main(int argc, char *argv[])
+    {
+      //  左值
+      int n = 1;
+      int& r1 = n;                    // 到对象 n 的左值引用
+      const int& cr(n);               // 引用可以有更多 cv 限定
+      volatile int& cv{n};            // 可使用任何初始化器语法
+      int& r2 = r1;                   // 另一到对象 n 的左值引用
+      //  int& bad = cr;                  // 错误：更少 cv 限定
+      int& r3 = const_cast<int&>(cr); // 需要 const_cast
+
+      void (&rf)(int) = foo;  // 到函数的左值引用
+      int ar[3];
+      int (&ra)[3] = ar;      // 到数组的左值引用
+
+      B b;
+      A& base_ref = b;        // 到基类子对象的左值引用
+      int& converted_ref = b; // 到转换结果的左值引用
+
+      //  右值
+      //  int& bad = 1;        // 错误：不能绑定左值引用到右值
+      const int& cref = 1; // 绑定到右值
+      int&& rref = 1;      // 绑定到右值
+
+      const A& cref2 = bar(); // 到 B 临时量的 A 子对象的引用
+      A&& rref2 = bar();      // 相同
+      cref2.print();
+      rref2.print();
+
+
+      int&& xref = static_cast<int&&>(n); // 直接绑定到 n
+      //  int&& copy_ref = n;                 // 错误：不能绑定到左值
+      double&& copy_ref = n;              // 绑定到值为 1.0 的右值临时量
+
+      // 临时量生存期上的限制
+      // std::ostream& buf_ref = std::ostringstream() << 'a'; // ostringstream 临时量
+      // 被绑定到 operator<< 的左运算数，但是它的生存期在分号结束，
+      // 所以 buf_ref 是悬垂引用。
+
+      S a{1, {2, 3}};          // 绑定临时量 pair {2,3} 到引用成员 a.mp，
+      // 并延长它的生存期以匹配 a
+      S* p = new S{1, {2, 3}}; // 绑定临时量 pair {2,3} 到引用成员 p->mp，
+      // 但是它的生存期在分号结束
+      // p->mp 是悬垂引用
+      delete p;
+    }
+  #+end_src
+
+** smart pointer
+- unique_ptr
+  不可复制构造 (CopyConstructible) 或可复制赋值 (CopyAssignable)
+  可移动构造 (MoveConstructible) 和可移动赋值 (MoveAssignable)
+  需要用 std::move, std::forward, emplace_back
+  #+begin_src c++
+    std::unique_ptr<B> p = std::make_unique<D>();
+    std::vector<std::unique_ptr<B>> v;
+    v.push_back(std::make_unique<D>());
+    v.push_back(std::move(p));
+    v.emplace_back(new D);
+  #+end_src
+
+  消费 unique_ptr 的函数能以值或以右值引用接收它
+
+- shared_ptr
+  函数调用时传值才会修改 use count
+
+- weak_ptr
+  调用 lock() 使得其所指向的 shared ptr 的 use count 增加
 
 * network
 ** base

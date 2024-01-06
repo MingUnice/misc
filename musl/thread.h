@@ -52,7 +52,7 @@ void unlock(volatile int *l)
 {
   /* Check l[0] to see if we are multi-threaded. */
   if (l[0] < 0) {
-    if (a_fetch_add(l, 1) {
+    if (a_fetch_add(l, 1)) {
       wake(l, 1, 1);
     }
   }
