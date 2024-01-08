@@ -990,7 +990,6 @@ PELT(Per-Entity Load Tracking) 算法跟踪每个调度实体的负载
 * c/cpp
 link: -fvisibility=hidden 或 --version-script 控制库中符号的可见性
 
-
 多态类的 typeinfo 由其 vtable 指向
 
 enable_shared_from_this 使用 CRTP 实现 shared_from_this, 使得使用 this 指针时正确地增加 use_count
@@ -1157,7 +1156,6 @@ CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID
   int clock_gettime(clockid_t clk_id, struct timespec *tp);
 #+end_src
 
-
 ** cmake
 - 添加编译选项: add_compile_options(-g -O0 -std=c++17 -D_DEBUG -D__LINUX__ -Wno-enum-compare)
 - 获取父目录: get_filename_component(PARENT_DIR ${PROJECT_SOURCE_DIR} DIRECTORY)
@@ -1167,7 +1165,6 @@ CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID
   - find_package(Protobuf)
   - include_directories(${Protobuf_INCLUDE_DIRS})
   - target_link_libraries(a.out ${Protobuf_LIBRARIES} pthread)
-
 
 ** copy and move
 copy constructor
@@ -1180,8 +1177,8 @@ move assignment
   要实现类的用户定义移动语义需要同时实现 destructor, copy constructor, copy assignment, move constructor, move assignment
   要使用隐式的这5个函数, 不能定义任一用户定义的其中一种
 
-- 复制消除
-  省略复制及移动构造函数, 导致零复制的按值传递语义
+- 复制消除 copy elision
+  非必须不会将纯右值实质化, 省略复制及移动构造函数, 导致零复制的按值传递语义
 
 - lvalue, xvalue, prvalue
   拥有身份且不可被移动的表达式被称作左值 (lvalue) 表达式
