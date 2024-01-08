@@ -112,10 +112,8 @@ merge intervals
 partition labels
 
 * disjoint set union
-annagrams group
+anagrams group
 pseudo critical edges mst
-
-* dsu
 max edges remove keep connect
 
 * sync
